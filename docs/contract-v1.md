@@ -1,6 +1,6 @@
 # Quizzie AI contract — v1 (draft for review)
 
-Status: **draft, ready for full review**. Nothing is implemented yet. Still open: the database (section 7) and how parents sign in (section 7.1). Future enhancements beyond v1 are listed at the end.
+Status: **draft, ready for full review**. Nothing is implemented yet. Still open: the database (section 7) and which sign-in methods parents get (section 7.1). Future enhancements beyond v1 are listed at the end.
 
 In v1 a **parent** makes and manages quizzes, a **child** takes them, and the **app owner** makes the global quizzes anyone can browse. Section 7.1 has the details.
 
@@ -393,7 +393,18 @@ Who's who in v1:
 
 Wherever this document says the parent does something to a quiz, the app owner does the same to a global quiz. Teachers, schools and classes come later (section 9) and will take the parent and child roles.
 
-**Account:** `accountId`, the parent's sign-in details, `profiles[]` (`profileId`, `name`) and the account settings (section 7.8). How parents sign in (email and password, Google, an emailed link) is not decided yet.
+**Account:** `accountId`, `authUserId` (the parent's Supabase Auth user), `profiles[]` (`profileId`, `name`) and the account settings (section 7.8).
+
+**Signing in** uses Supabase Auth:
+
+- The web app signs the parent in with Supabase and sends the access token (a JWT) with every API request.
+- The API verifies the token itself against Supabase's published signing keys (the project uses asymmetric JWT signing keys), then finds the account from the token's user id.
+- Supabase stores the parent's email and password; Quizzie never handles passwords. Child profiles are Quizzie data only, so Supabase holds no information about children.
+- The app owner's role is a flag on the app owner's account, checked by the API.
+- All quiz data goes through the Quizzie API, never from the browser straight to Supabase, so the server stays in control of what reaches the browser (section 7.4).
+- Which sign-in methods parents get in v1 (email and password, an emailed link, Google) is not decided yet.
+
+A child profile can later be linked to its own login (section 9); the data model doesn't change, because the login points to the existing `profileId`.
 
 **Switching profiles** needs no PIN or password in v1. **Known limitation:** a child using the device can switch to the parent view and see answers, rubrics and other children's results. A parent PIN is listed for later (section 9).
 
@@ -630,3 +641,13 @@ Child answer uploads, per descriptive question:
 3. **Parents uploading their own images** — adding a picture to a question or option while editing. In v1 a parent can only adjust or remove the crops the model picked.
 4. **Teachers, schools and classes** — new account types beyond parents and children. Teachers and students would take the parent and child roles (section 7.1), with classes in place of child profiles.
 5. **Parent PIN** — a PIN to leave a child profile or open the parent view, so a child can't see answers or other children's results (section 7.1).
+6. **Child sign-in** — older children get their own login and use Quizzie on their own device:
+   - The parent decides which children get a login, and creates and owns it.
+   - The login is linked to the child's existing profile (`profileId`), so their quizzes, attempts and results are already there.
+   - A child login can only see the quizzes given to that child, take them in the answer-free view, and see their own results as allowed by `resultVisibility`. The API enforces this from the token's role, so a child can never reach the parent view.
+   - Younger children who share the parent's device keep using profile switching.
+   - How a child signs in without an email address is to be decided. Options:
+     - **Username and password set by the parent** (preferred so far): no email needed; the parent resets it. Supabase password sign-in needs an email or phone, so Quizzie would give Supabase an internal address that never receives email.
+     - **The child's own email, invited by the parent:** normal password resets, but only for children who have an email address.
+     - **Sign-in code or QR code from the parent's device:** easiest for young children, but more custom work.
+   - Before this ships, check the children's privacy rules that apply, such as COPPA in the US and Australia's Children's Online Privacy Code under the Privacy Act.
