@@ -1,6 +1,13 @@
 # Quizzie AI contract — v1 (draft for review)
 
-Status: **draft, ready for full review**. Nothing is implemented yet. Still open: the database (section 7) and which sign-in methods parents get (section 7.1). Future enhancements beyond v1 are listed at the end.
+Status: **draft, ready for full review**. Nothing is implemented yet. Still open:
+
+- which sign-in methods parents get (section 7.1)
+- how long attempts and their answers are kept: every answer to every question in every attempt is stored, so a retention rule (e.g. archive or delete after two years) is worth deciding before launch, also as a privacy commitment for children's data (section 7.3)
+- whether a child's answers are saved as they go, so a closed tab or a flat battery doesn't lose the attempt, or only sent at submit. Saving as they go would use the same answer shapes (section 7.3)
+- which AWS service runs the API: App Runner or ECS Fargate (section 7)
+
+Future enhancements beyond v1 are listed at the end.
 
 In v1 a **parent** makes and manages quizzes, a **child** takes them, and the **app owner** makes the global quizzes anyone can browse. Section 7.1 has the details.
 
@@ -24,7 +31,11 @@ packages/contract
   schemas/quiz-extraction.v1.json   JSON Schema generated from the Zod schema, committed
   schemas/grading.v1.json
   schemas/answer-filling.v1.json
+  src/quiz-views.ts          answer-free view and result view (sections 7.4, 7.5): API → web app
+  src/attempt.ts             answer shapes and submission (section 7.3): web app → API
 ```
+
+The last two are not AI contracts. They are the contract between the web app and the API, kept in the same package so the quiz screen and the marking code share one definition.
 
 - **The API** sends the generated JSON Schema to Claude as the required output format (structured outputs), so the model's reply has to match the shape.
 - **The API** then parses the reply with the Zod schema. That also runs the rules JSON Schema can't express (section 6).
@@ -338,7 +349,7 @@ What each value does:
 
 | Value | Flow |
 |---|---|
-| `automatic` | Compared with the correct option(s), true/false answer, pairs or order. Multi-select, matching and ordering can earn partial credit (below) |
+| `automatic` | Compared with the correct option(s), true/false answer, pairs or order. Multi-select, matching and ordering can earn part of the points (below) |
 | `accepted_answers_only` | Matched against `acceptedAnswers` (per label or blank, for diagram labelling and fill in the blanks), ignoring case, surrounding spaces and repeated spaces. With a `wordBank`, the child picks a word, so it's an exact match |
 | `accepted_answers_then_ai` | Same match first; if there's no match, contract B decides |
 | `ai_auto` | AI grade goes straight to the child, unless `needsReview` is true, in which case it waits for the parent |
@@ -347,16 +358,16 @@ What each value does:
 
 Scoring, as a share of the question's `points`:
 
-| Type | Full points | Half points | 0 |
-|---|---|---|---|
-| `single_choice`, `true_false`, `short_answer` | Correct | — | Anything else |
-| `multi_select` | Exactly the correct options picked | At least one correct option picked, but not exactly the correct set | No correct option picked (including nothing picked) |
-| `matching` | Every pair correct | At least half the pairs correct, but not all | Fewer than half the pairs correct |
-| `ordering` | Every item in its correct position | At least half the items in their correct position, but not all | Fewer than half in their correct position |
-| `diagram_labelling` | Every label correct | At least half the labels correct, but not all | Fewer than half the labels correct |
-| `fill_in_blanks` | Every blank correct | At least half the blanks correct, but not all | Fewer than half the blanks correct |
+| Type | Points awarded |
+|---|---|
+| `single_choice`, `true_false`, `short_answer` | Full points if correct, otherwise 0 |
+| `multi_select` | Full points if exactly the correct options are picked; half points if at least one correct option is picked but not exactly the correct set; 0 if no correct option is picked (including nothing picked) |
+| `matching` | A share per correct pair: points × correct pairs ÷ left items |
+| `ordering` | A share per item in its correct position: points × items in place ÷ items |
+| `diagram_labelling` | A share per correct label: points × correct labels ÷ labels |
+| `fill_in_blanks` | A share per correct blank: points × correct blanks ÷ blanks |
 
-Unanswered pairs, positions, labels and blanks count as wrong. "At least half" means correct × 2 ≥ total, so 2 of 4 or 2 of 3 is half points, and 1 of 3 is 0. The threshold is there so that guessing doesn't earn half points: a random arrangement usually gets one or two items right by chance.
+For example, a matching question worth 2 points with 3 of 4 pairs right earns 1.5 points. Unanswered pairs, positions, labels and blanks count as wrong. Points awarded are rounded to two decimal places.
 
 Picking every option of a multi-select question scores 0, unless every option is correct. Otherwise picking everything would always earn half points.
 
@@ -364,7 +375,7 @@ Picking every option of a multi-select question scores 0, unless every option is
 - **Whether a quiz needs AI evaluation** is calculated: true if any of its questions does. It is not stored.
 - **Descriptive default setting** (`descriptiveEvaluationDefault`) exists at two levels, like `resultVisibility` (section 7.5):
   - **Account** — in the account's settings. Default for a new account: `ai_auto`.
-  - **Quiz** — on `quiz.json`, one of the three descriptive values or `null` to use the account value. A quiz-level value overrides the account one. It can be chosen at upload, before the AI draft arrives.
+  - **Quiz** — on the quiz, one of the three descriptive values or `null` to use the account value. A quiz-level value overrides the account one. It can be chosen at upload, before the AI draft arrives.
   - The default is **copied** into a descriptive question's `evaluation` when the question is created (AI draft or added by the parent). After that the question keeps its own value, so changing a default never changes existing questions or the grading of attempts already submitted.
   - Changing the quiz-level default affects only descriptive questions created after the change. To change an existing descriptive question, the parent edits that question.
 - **The AI extraction response does not include `evaluation`.** How to grade is the parent's decision. The app fills in the defaults by question type when a draft arrives, and the parent changes them in review.
@@ -404,7 +415,38 @@ There is no automatic check that the model's text matches the source files in v1
 
 Shown here only to make the boundary with the AI contract clear.
 
-Where this data is stored is **not decided yet** (files, MongoDB or PostgreSQL). The file paths below show what is stored, not how it will be stored.
+**Hosting.** Supabase is used for sign-in only (section 7.1). Everything else runs in Quizzie's AWS account, in the Sydney region (`ap-southeast-2`), so all quiz, attempt and child data stays in Australia:
+
+| Part | Where |
+|---|---|
+| Sign-in (parents' emails and passwords) | Supabase Auth, in a Supabase project in the Sydney region, on a paid plan for production because free projects pause when idle |
+| Web app (the SPA's static files) | AWS: S3 and CloudFront |
+| API (Fastify) | AWS: containers on App Runner or ECS Fargate (to be chosen) |
+| AI jobs (extraction, answer filling, grading) | AWS: an SQS queue and a worker. The API answers straight away and the web app checks back, because an AI call can take longer than a web request should wait |
+| Database | AWS: RDS for PostgreSQL, starting on one `db.t4g.micro` instance in a single availability zone. A reserved instance and a standby in a second zone can be added once usage is steady |
+| Images and uploaded files | AWS: S3, in private buckets. The API hands the browser short-lived links only to files the signed-in user may see. A lifecycle rule deletes leftover temporary uploads after one day, as a safety net for section 7.2 |
+
+The database is in a private network next to the API and is not reachable from the internet. The API reaches the database and S3 through AWS permission roles, not stored passwords or keys.
+
+**Tables:**
+
+| Table | Holds |
+|---|---|
+| `accounts` | One row per parent account: `authUserId` (the Supabase Auth user id), the parent's details, `isAppOwner`, the account settings |
+| `child_profiles` | One row per child profile |
+| `quizzes` | One row per quiz. `contexts` and `questions` are `jsonb` columns, checked by the contract's Zod schemas |
+| `quiz_assignments` | Which children each quiz is given to |
+| `quiz_uploads` | A record of each uploaded file (the files themselves are temporary, section 7.2) |
+| `quiz_images` | One row per image; the image file itself is in S3 |
+| `ai_responses` | The AI's original extraction and answer-filling responses, unchanged, in a `jsonb` column |
+| `attempts` | One row per attempt |
+| `attempt_answers` | One row per question in an attempt, including skipped ones (section 7.3) |
+| `answer_uploads` | One row per file a child uploads for a descriptive answer |
+| `app_settings` | App-wide values set by the app owner, such as `maxQuestionsPerQuiz` |
+
+- Document-shaped data (questions, contexts, answers, AI responses) is stored in `jsonb` columns. Everything Quizzie filters or joins on (owner, status, version, grading status) is an ordinary column.
+- Image and upload files are not stored in the database; their rows hold their S3 location.
+- All access goes through the Quizzie API (section 7.1).
 
 ### 7.1 Accounts, profiles and quiz ownership
 
@@ -440,9 +482,11 @@ Quizzie collects only the personal details it uses:
 
 - The web app signs the parent in with Supabase and sends the access token (a JWT) with every API request.
 - The API verifies the token itself against Supabase's published signing keys (the project uses asymmetric JWT signing keys), then finds the account from the token's user id.
+- **The account is created on first sign-in.** Supabase and Quizzie's database are separate, so when the API sees a valid token for a user it has no account for, it creates the `accounts` row and asks the parent for their details. The database can't enforce that `authUserId` matches a real Supabase user; the API does.
+- **Deleting an account** removes the Supabase user and all of the account's Quizzie data (profiles, quizzes, attempts, answers, files) in one step run by the API.
 - Supabase stores the parent's email and password; Quizzie never handles passwords. Child profiles are Quizzie data only, so Supabase holds no information about children.
 - The app owner's role is a flag on the app owner's account, checked by the API.
-- All quiz data goes through the Quizzie API, never from the browser straight to Supabase, so the server stays in control of what reaches the browser (section 7.4).
+- All quiz data goes through the Quizzie API; the browser talks to Supabase only to sign in, so the server stays in control of what reaches the browser (section 7.4).
 - Which sign-in methods parents get in v1 (email and password, an emailed link, Google) is not decided yet.
 
 A child profile can later be linked to its own login (section 9); the data model doesn't change, because the login points to the existing `profileId`.
@@ -466,7 +510,7 @@ A child profile can later be linked to its own login (section 9); the data model
 
 - The copy is a new quiz with a new `quizId`, owned by the account, at `quizVersion` 1 and `published`, because a global quiz can only be published once every question has an answer.
 - **Copied:** the title, the contexts, the questions with all their answer fields, `answerBasis`, `evaluation` and `points`, the images (as new files with new random names), and the quiz-level settings.
-- **Not copied:** `extraction.json`, the answer-filling responses, and the `sourceRefs` of questions, contexts and answers. They refer to the app owner's uploads, which the parent never had, so they stay with the global quiz. There are no source files to copy, because uploaded files are deleted after extraction (section 7.2).
+- **Not copied:** the AI responses (`ai_responses`), and the `sourceRefs` of questions, contexts and answers. They refer to the app owner's uploads, which the parent never had, so they stay with the global quiz. There are no source files to copy, because uploaded files are deleted after extraction (section 7.2).
 - The copy records `copiedFrom: {quizId, quizVersion}`.
 - The copy is fully editable, like any account quiz. Editing it never changes the global quiz, and later edits to the global quiz never reach copies. Unpublishing or deleting a global quiz doesn't affect existing copies either.
 - Assigning the same global quiz again makes another, separate copy. The browse page shows when a quiz is already in the account.
@@ -484,17 +528,9 @@ There is one copy of each quiz. It carries a `quizVersion` number, and every sav
 
 Changes to a quiz can't be saved while any of its attempts has a pending grade: an AI grading call still running, an `ai_suggest` grade waiting for the parent, a `manual` descriptive answer not yet graded, or an AI grade with `needsReview`. The editor tells the parent how many grades are pending and links to them.
 
-```
-data/quizzes/<quizId>/quiz.json         the quiz (one copy)
-data/quizzes/<quizId>/extraction.json   the AI's original contract A response, unchanged
-data/quizzes/<quizId>/answer-filling/   each contract C response, unchanged
-data/quizzes/<quizId>/uploads.json      what was uploaded: filename, kind (source or answer_key), type, size, pages
-data/quizzes/<quizId>/images/           question, option and context images (section 7.7)
-```
+**Uploaded files are temporary.** Source files and answer key files are kept only until the AI call that uses them has finished and, for source files, the images have been cropped. Then they are deleted, and only their row in `quiz_uploads` remains: filename, kind (`source` or `answer_key`), type, size and pages. The parent never needs to upload them again: images are replaced by uploading a new image (section 7.7), and answer filling and grading work from the quiz JSON (section 2.3). If extraction fails, the files are deleted too, and the parent uploads them again to retry.
 
-**Uploaded files are temporary.** Source files and answer key files are kept only until the AI call that uses them has finished and, for source files, the images have been cropped. Then they are deleted, and only the record in `uploads.json` remains. The parent never needs to upload them again: images are replaced by uploading a new image (section 7.7), and answer filling and grading work from the quiz JSON (section 2.3). If extraction fails, the files are deleted too, and the parent uploads them again to retry.
-
-`quiz.json`:
+A quiz (a row in `quizzes`):
 
 | Field | Notes |
 |---|---|
@@ -516,7 +552,7 @@ Points per question are set by the app, not the AI, when the question is created
 
 The parent can change points in review or when editing. For a descriptive question, `points` always equals its rubric total: to make it worth more, the parent changes the criteria's `maxPoints`, so grades never need scaling.
 
-`extraction.json` and the `answer-filling/` responses are the AI's output, not copies of the quiz. They are written once and let us see what the AI produced versus what the parent changed, and later measure extraction quality.
+The responses in `ai_responses` are the AI's output, not copies of the quiz. Each row also records the model, the token counts, when the call ran and whether it succeeded. They are written once and let us see what the AI produced versus what the parent changed, and later measure extraction quality.
 
 ### 7.3 Attempts
 
@@ -526,8 +562,58 @@ The parent can change points in review or when editing. For a descriptive questi
 | `profileId` | The child who made the attempt. Only a child the quiz is given to can start one (section 7.1) |
 | `quizVersion` | The quiz's version when the attempt started. It must still match at submit (see below) |
 | `startedAt`, `submittedAt` | |
-| `answers[]` | Per question: `questionId`, the child's answer, how it was graded, `pointsAwarded`, `maxPoints` at the time of grading, and any AI grading response (contract B) |
+| `answers[]` | Per question, including skipped ones: `questionId`, the child's `answer` (shapes below), how it was graded (`automatic`, `accepted_answer`, `ai` or `parent`), `gradingStatus` (`graded` \| `pending`), `result`, `pointsAwarded`, `maxPoints` at the time of grading, and any AI grading response (contract B) |
 | `score`, `maxScore` | Calculated by the server from the answers |
+
+**Answer shapes.** Each answer carries its question's `type`, so the server checks it against the right schema (a Zod discriminated union) and rejects an answer of the wrong type:
+
+| Type | `answer` | Rules |
+|---|---|---|
+| `single_choice` | `{type: "single_choice", optionId}` | One of the question's options |
+| `multi_select` | `{type: "multi_select", optionIds: string[]}` | 1 or more, no repeats, all existing options. Nothing ticked is sent as `null` |
+| `true_false` | `{type: "true_false", value: boolean}` | |
+| `short_answer` | `{type: "short_answer", text}` | Trimmed; within the short-text limit (below) |
+| `matching` | `{type: "matching", pairs: {leftId, rightId}[]}` | At most one pair per left item; a right item may be used more than once (section 2.4). Left items without a pair count as wrong |
+| `ordering` | `{type: "ordering", order: itemId[]}` | Every item exactly once |
+| `diagram_labelling` | `{type: "diagram_labelling", labels: {id, text}[]}` | At most one entry per label; missing labels count as wrong. With a `wordBank`, each `text` is one of its words. Each `text` is trimmed and within the short-text limit (below) |
+| `fill_in_blanks` | `{type: "fill_in_blanks", blanks: {id, text}[]}` | Same rules as labels |
+| `descriptive`, typed | `{type: "descriptive", kind: "text", text}` | Within the limit for the question's `length` (below). The `suggestedWordRange` is guidance only |
+| `descriptive`, uploaded | `{type: "descriptive", kind: "upload", uploadIds: string[]}` | Only when uploads are allowed for this attempt (section 7.6). Files are uploaded first and get ids; limits in section 7.9 |
+| Not answered | `null` | |
+
+- **Ordering always has an answer:** whatever order is on screen at submit is the child's answer, even if they never moved anything, and it earns a share for each item that happens to be in its correct position (section 5).
+- **Words picked from a word bank are sent as text,** so labels and blanks are marked the same way whether the child typed or picked.
+
+**Text limits.** Each typed answer has a maximum length, so nobody can paste thousands of words into a question that needs one word or one sentence. The limits are well above the suggested word ranges (section 2.4), so a genuine answer never comes close:
+
+| Text | Limit | Roughly |
+|---|---|---|
+| Short text: a `short_answer`, each diagram label, each blank | 200 characters | 30 words |
+| `descriptive`, length `short` | 2,000 characters | 300 words |
+| `descriptive`, length `long` | 5,000 characters | 800 words |
+| `descriptive`, length `essay` | 30,000 characters | 5,000 words |
+
+- The server enforces the limits; an answer over its limit rejects the submission.
+- The quiz screen shows a counter (e.g. "150 / 300 words") and stops typing at the limit, so the child sees the boundary instead of an error.
+- The limit is the one for the question's `length` when the attempt is answered. A parent changing a question's length is an ordinary edit, so earlier attempts are unaffected.
+- Uploaded answers are limited by files, size and pages instead (section 7.9).
+- The limits are in the server config, like the upload limits, so they can be changed without a code change.
+
+**Submission:**
+
+```json
+{
+  "attemptId": "a_81f2",
+  "quizVersion": 3,
+  "answers": [
+    { "questionId": "q1", "answer": { "type": "single_choice", "optionId": "b" } },
+    { "questionId": "q2", "answer": null }
+  ]
+}
+```
+
+- Exactly one entry for every question in the quiz, with `null` for skipped ones, so nothing is silently missing.
+- Every option, item, label, blank and upload id must exist in that question or attempt; otherwise the submission is rejected.
 
 - If the quiz changed while the attempt was in progress (its `quizVersion` no longer matches), the submission is rejected with "Quiz was changed, please start again" and the in-progress attempt is discarded.
 - The mark of every attempt is shown against its `quizVersion`.
@@ -555,7 +641,7 @@ What a child sees is controlled by a `resultVisibility` setting with three level
 The setting exists at two levels:
 
 - **Account** — in the account's settings, one value for the family. Default for a new account: `score_and_results`.
-- **Quiz** — `resultVisibility` on `quiz.json`, either one of the three levels or `null` to use the account value. A quiz-level value overrides the account one.
+- **Quiz** — `resultVisibility` on the quiz, either one of the three levels or `null` to use the account value. A quiz-level value overrides the account one.
 
 The parent always sees everything about an attempt; `resultVisibility` only controls what the child sees.
 
@@ -594,7 +680,7 @@ For descriptive questions, a child either **types** the answer or **uploads** it
 Whether uploading is allowed is the `allowAnswerUpload` setting (true/false):
 
 - **Account** — in the account's settings. Default for a new account: `false` (uploads not allowed).
-- **Quiz** — on `quiz.json`, `true`, `false`, or `null` to use the account value. A quiz-level value overrides the account one.
+- **Quiz** — on the quiz, `true`, `false`, or `null` to use the account value. A quiz-level value overrides the account one.
 - When uploading is allowed, the child picks type or upload per question. When it isn't, the child types.
 - Changing `allowAnswerUpload` is not a change to the quiz's questions, so it does not increment `quizVersion`.
 - The effective value is recorded on the attempt when it starts and applies for that whole attempt, so a child who has already uploaded isn't caught out by a change mid-attempt.
@@ -614,7 +700,7 @@ Uploaded answers:
 
 The model picks the crop, the server cuts it out once, and the parent can replace or remove it.
 
-- **Cropping:** straight after extraction, while the uploaded files still exist (section 7.2), the server renders the PDF page (or takes the uploaded photo, after HEIC conversion), cuts out `box`, and saves the result under `data/quizzes/<quizId>/images/` with a random file name that reveals nothing about the answer.
+- **Cropping:** straight after extraction, while the uploaded files still exist (section 7.2), the server renders the PDF page (or takes the uploaded photo, after HEIC conversion), cuts out `box`, and saves the result in S3, with a `quiz_images` row and a random file name that reveals nothing about the answer.
 - **Stored quiz:** a question, option or context stores the image (`imageId`) and its `description`, not the box.
 - **Review:** the parent checks each image. The review screen reminds them to check that an image doesn't include an answer (e.g. a ticked box on a worksheet with an answer key). For each image the parent can:
   - **Replace** it by uploading an image file they cropped themselves (a screenshot, a photo or an edited picture). The same formats as other uploads, with HEIC converted to JPEG; resized by the server and saved with a new random name. The `description` is kept, and the parent can edit it.
